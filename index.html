@@ -385,16 +385,6 @@
       <button class="btn btn-sm" style="background:var(--card);border:1px solid var(--border);" onclick="exportCSV()">📊 تحميل CSV</button>
     </div>
   </div>
-  <div class="bksec">
-    <div class="bkico">📂</div>
-    <h2>استيراد ملف JSON</h2>
-    <p>استرجع بياناتك من ملف JSON محفوظ مسبقاً.</p>
-    <label class="fdrop">
-      <input type="file" accept=".json" onchange="importJSON(event)">
-      <div style="font-size:28px;margin-bottom:6px;">📁</div>
-      <p>انقر لاختيار ملف JSON</p>
-    </label>
-  </div>
   <div class="bksec" style="padding:16px;">
     <h2 style="color:var(--red);margin-bottom:8px;">⚠️ إعادة الضبط</h2>
     <p style="font-size:11px;margin-bottom:12px;">حذف جميع البيانات المحلية.</p>
@@ -460,6 +450,10 @@ let records   = JSON.parse(localStorage.getItem('fishingRecords')   || '[]');
 let purchases = JSON.parse(localStorage.getItem('fishingPurchases') || '[]');
 let deletedRecordIds   = JSON.parse(localStorage.getItem('deletedRecordIds')   || '[]');
 let deletedPurchaseIds = JSON.parse(localStorage.getItem('deletedPurchaseIds') || '[]');
+let pendingRecords   = JSON.parse(localStorage.getItem('pendingRecords')   || '{}');
+let pendingPurchases = JSON.parse(localStorage.getItem('pendingPurchases') || '{}');
+function queueRecord(r){ pendingRecords[r.id]=r; localStorage.setItem('pendingRecords', JSON.stringify(pendingRecords)); }
+function queuePurchase(p){ pendingPurchases[p.id]=p; localStorage.setItem('pendingPurchases', JSON.stringify(pendingPurchases)); }
 let statsMonth = new Date(); statsMonth.setDate(1);
 let currentReportBoat = null;
 let autoSaveTimer = null;
@@ -554,19 +548,27 @@ async function loadFromSheets(){
 }
 
 async function saveToSheets(){
+  const recsToSend = Object.values(pendingRecords);
+  const pursToSend = Object.values(pendingPurchases);
+  if(recsToSend.length===0 && pursToSend.length===0 && deletedRecordIds.length===0 && deletedPurchaseIds.length===0){
+    return; // ما فيه أي تغيير جديد لإرساله
+  }
   setSyncStatus('loading','جاري الحفظ في Google Sheets...');
   showLoading('جاري الحفظ في Google Sheets...');
   try{
     const res = await fetch(SHEET_URL,{
       method:'POST',
-      body: JSON.stringify({action:'saveAll', records, purchases, deletedRecordIds, deletedPurchaseIds})
+      body: JSON.stringify({action:'saveAll', records:recsToSend, purchases:pursToSend, deletedRecordIds, deletedPurchaseIds})
     });
     const data = await res.json();
     hideLoading();
     if(data.status==='ok'){
       deletedRecordIds=[]; deletedPurchaseIds=[];
+      pendingRecords={}; pendingPurchases={};
       localStorage.setItem('deletedRecordIds','[]');
       localStorage.setItem('deletedPurchaseIds','[]');
+      localStorage.setItem('pendingRecords','{}');
+      localStorage.setItem('pendingPurchases','{}');
       setSyncStatus('ok',`تم الحفظ ✓ — ${new Date().toLocaleTimeString('ar-DZ')}`);
       showToast('☁️ تم الحفظ في Google Sheets');
     } else {
@@ -618,8 +620,10 @@ function addRecord(){
   if(!date){showToast('❌ اختر التاريخ');return;}
   if(!boat){showToast('❌ اختر القارب');return;}
   if(share===null||isNaN(share)){showToast('❌ أدخل حصتك المالية');return;}
-  records.push({id:Date.now(),date,boat,fishType:ft,qty,price,expenses,share,notes,totalSales:qty*price});
+  const newRec={id:Date.now(),date,boat,fishType:ft,qty,price,expenses,share,notes,totalSales:qty*price};
+  records.push(newRec);
   records.sort((a,b)=>b.date.localeCompare(a.date));
+  queueRecord(newRec);
   saveAndSync();
   clearEntryForm();renderTodaySummary();renderTodayTable();renderRecords();renderStats();
   showToast('✅ تم التسجيل — سيُحفظ في Sheets خلال ثوانٍ');
@@ -650,8 +654,8 @@ function renderTodayTable(){
   const c=document.getElementById('todayTableContainer');
   if(!tr.length){c.innerHTML='<div class="empty"><div class="ei">🌊</div><p>لا توجد سجلات لهذا اليوم</p></div>';return;}
   c.innerHTML=`<table><thead><tr><th>القارب</th><th>السمك</th><th>الكمية</th><th>المبيعات</th><th>المصاريف</th><th>💰 حصتك</th><th>ملاحظات</th><th></th></tr></thead>
-  <tbody>${tr.map(r=>`<tr>
-    <td><span class="bb ${BOATS[r.boat].cls}">⚓ ${BOATS[r.boat].name}</span></td>
+  <tbody>${tr.map(r=>{const bt=BOATS[r.boat]||{name:'غير محدد',cls:'b1'};return `<tr>
+    <td><span class="bb ${bt.cls}">⚓ ${bt.name}</span></td>
     <td>${r.fishType}</td><td>${fn(r.qty)} كغ</td><td>${fn(r.totalSales)} دج</td>
     <td>${fn(r.expenses)} دج</td><td class="amc">${fn(r.share)} دج</td>
     <td style="color:var(--muted);font-size:11px;">${r.notes||'—'}</td>
@@ -665,6 +669,8 @@ function renderTodayTable(){
 function deleteRecord(id){
   if(!confirm('حذف هذا السجل؟'))return;
   records=records.filter(r=>r.id!==id);
+  delete pendingRecords[id];
+  localStorage.setItem('pendingRecords', JSON.stringify(pendingRecords));
   deletedRecordIds.push(id);
   localStorage.setItem('deletedRecordIds', JSON.stringify(deletedRecordIds));
   saveAndSync();renderTodaySummary();renderTodayTable();renderRecords();renderStats();
@@ -681,8 +687,10 @@ function addPurchase(){
   if(!boat){showToast('❌ اختر القارب');return;}
   if(!desc){showToast('❌ اكتب وصف السلعة');return;}
   if(price<=0){showToast('❌ أدخل السعر');return;}
-  purchases.push({id:Date.now(),date,boat,desc,price,paid:false,paidDate:null});
+  const newPur={id:Date.now(),date,boat,desc,price,paid:false,paidDate:null};
+  purchases.push(newPur);
   purchases.sort((a,b)=>b.date.localeCompare(a.date));
+  queuePurchase(newPur);
   saveAndSync();
   document.getElementById('pDesc').value='';
   document.getElementById('pPrice').value='';
@@ -743,9 +751,9 @@ function renderAllPurchases(){
   const c=document.getElementById('allPurchasesContainer');
   if(!f.length){c.innerHTML='<div class="empty"><div class="ei">🛒</div><p>لا توجد مشتريات</p></div>';return;}
   c.innerHTML=`<table><thead><tr><th>التاريخ</th><th>القارب</th><th>السلعة/الخدمة</th><th>السعر</th><th>الحالة</th><th></th></tr></thead>
-  <tbody>${f.map(p=>`<tr>
+  <tbody>${f.map(p=>{const bt=BOATS[p.boat]||{name:'غير محدد',cls:'b1'};return `<tr>
     <td style="font-size:10px;color:var(--muted);">${fd(p.date)}</td>
-    <td><span class="bb ${BOATS[p.boat].cls}">⚓ ${BOATS[p.boat].name}</span></td>
+    <td><span class="bb ${bt.cls}">⚓ ${bt.name}</span></td>
     <td>${p.desc}</td>
     <td class="${p.paid?'amc':'dec'}">${fn(p.price)} دج</td>
     <td>${p.paid?'<span class="bpaid">✅ مسدَّد</span>':'<span class="bunpaid">⏳ معلق</span>'}</td>
@@ -753,17 +761,18 @@ function renderAllPurchases(){
       ${!p.paid?`<button class="btnpaid" onclick="markOnePaid(${p.id})">✅ سُدِّد</button>`:''}
       <button class="btn btn-danger" onclick="deletePurchase(${p.id})">حذف</button>
     </td>
-  </tr>`).join('')}</tbody></table>`;
+  </tr>`;}).join('')}</tbody></table>`;
 }
 
 function markOnePaid(id){
   const p=purchases.find(p=>p.id===id);if(!p)return;
   p.paid=true;p.paidDate=ds(new Date());
+  queuePurchase(p);
   saveAndSync();renderPurchasesPage();showToast('✅ تم تسجيل السداد');
 }
 
 function markBoatPaid(){
-  purchases.filter(p=>p.boat===currentReportBoat&&!p.paid).forEach(p=>{p.paid=true;p.paidDate=ds(new Date());});
+  purchases.filter(p=>p.boat===currentReportBoat&&!p.paid).forEach(p=>{p.paid=true;p.paidDate=ds(new Date());queuePurchase(p);});
   saveAndSync();closeModal();renderPurchasesPage();
   showToast(`✅ تم تسجيل سداد ${BOATS[currentReportBoat].name} الكامل`);
 }
@@ -771,6 +780,8 @@ function markBoatPaid(){
 function deletePurchase(id){
   if(!confirm('حذف هذا السجل؟'))return;
   purchases=purchases.filter(p=>p.id!==id);
+  delete pendingPurchases[id];
+  localStorage.setItem('pendingPurchases', JSON.stringify(pendingPurchases));
   deletedPurchaseIds.push(id);
   localStorage.setItem('deletedPurchaseIds', JSON.stringify(deletedPurchaseIds));
   saveAndSync();renderPurchasesPage();showToast('🗑 تم الحذف');
@@ -873,6 +884,7 @@ function saveEditRecord(){
   r.share=parseFloat(shareVal);
   r.totalSales=r.qty*(r.price||0);
   r.notes=notes;
+  queueRecord(r);
   saveAndSync();
   document.getElementById('editRecordModal').classList.remove('open');
   renderTodaySummary();renderTodayTable();renderRecords();renderStats();
@@ -928,37 +940,11 @@ function exportCSV(){
   const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`astoool_sayd_${ds(new Date())}.csv`;a.click();
   showToast('📊 تم التحميل');
 }
-function importJSON(event){
-  const file=event.target.files[0];if(!file)return;
-  const reader=new FileReader();
-  reader.onload=e=>{
-    try{
-      const data=JSON.parse(e.target.result);
-      const ir=data.records||(Array.isArray(data)?data:[]),ip=data.purchases||[];
-      const er=new Set(records.map(r=>r.id)),ep=new Set(purchases.map(p=>p.id));
-      let ar=0,ap=0;
-      ir.forEach(r=>{
-        if(r && r.id && r.date && r.boat && !er.has(r.id)){
-          records.push(r); er.add(r.id); ar++;
-        }
-      });
-      ip.forEach(p=>{
-        if(p && p.id && p.date && p.boat && !ep.has(p.id)){
-          purchases.push(p); ep.add(p.id); ap++;
-        }
-      });
-      records.sort((a,b)=>b.date.localeCompare(a.date));
-      purchases.sort((a,b)=>b.date.localeCompare(a.date));
-      saveAndSync();renderAll();
-      showToast(`✅ استُورد ${ar} صيد و ${ap} مشتريات`);
-    }catch{showToast('❌ ملف غير صالح');}
-  };
-  reader.readAsText(file);event.target.value='';
-}
 function resetAll(){
   if(!confirm('⚠️ حذف جميع البيانات المحلية؟'))return;
-  records=[];purchases=[];
+  records=[];purchases=[];pendingRecords={};pendingPurchases={};
   localStorage.removeItem('fishingRecords');localStorage.removeItem('fishingPurchases');
+  localStorage.setItem('pendingRecords','{}');localStorage.setItem('pendingPurchases','{}');
   saveLocal();renderAll();showToast('🗑 تم الحذف');
 }
 
